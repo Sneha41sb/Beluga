@@ -45,6 +45,8 @@ func (n *MeshNode) ProcessIncomingFrame(f frame.Frame) (frame.Frame, bool) {
 	relayFrame := frame.Frame{
 		Type:      f.Type,
 		TTL:       f.TTL - 1,
+		SenderID:  f.SenderID,
+		TargetID:  f.TargetID,
 		MessageID: f.MessageID,
 		Payload:   f.Payload,
 	}

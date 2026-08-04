@@ -9,6 +9,8 @@ func TestFrameEncodeDecode(t *testing.T) {
 	originalFrame := Frame{
 		Type:      TypeMeshAlert,
 		TTL:       5,
+		SenderID:  0x11223344,
+		TargetID:  BroadcastID,
 		MessageID: 1048576,
 		Payload:   []byte("EMERGENCY ALERT: Water & supplies at Central Square!"),
 	}
@@ -29,6 +31,12 @@ func TestFrameEncodeDecode(t *testing.T) {
 	if decodedFrame.TTL != originalFrame.TTL {
 		t.Errorf("TTL mismatch: expected %d, got %d", originalFrame.TTL, decodedFrame.TTL)
 	}
+	if decodedFrame.SenderID != originalFrame.SenderID {
+		t.Errorf("SenderID mismatch: expected %d, got %d", originalFrame.SenderID, decodedFrame.SenderID)
+	}
+	if decodedFrame.TargetID != originalFrame.TargetID {
+		t.Errorf("TargetID mismatch: expected %d, got %d", originalFrame.TargetID, decodedFrame.TargetID)
+	}
 	if decodedFrame.MessageID != originalFrame.MessageID {
 		t.Errorf("MessageID mismatch: expected %d, got %d", originalFrame.MessageID, decodedFrame.MessageID)
 	}
@@ -41,6 +49,8 @@ func TestFrameCRCCorruptionDetection(t *testing.T) {
 	originalFrame := Frame{
 		Type:      TypeNote,
 		TTL:       3,
+		SenderID:  0xAAAA1111,
+		TargetID:  0xBBBB2222,
 		MessageID: 42,
 		Payload:   []byte("Secret Note"),
 	}
@@ -48,7 +58,7 @@ func TestFrameCRCCorruptionDetection(t *testing.T) {
 	encodedBytes := Encode(originalFrame)
 
 	// Corrupt 1 byte in payload (simulate audio noise bitflip)
-	encodedBytes[15] ^= 0xFF
+	encodedBytes[23] ^= 0xFF
 
 	_, err := Decode(encodedBytes)
 	if err == nil {

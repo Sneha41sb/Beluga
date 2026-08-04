@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SonicBeacon — Ultrasonic Mesh Transceiver</title>
+    <meta name="description" content="Offline ultrasonic acoustic data transceiver and mesh network application.">
+    <link rel="manifest" href="manifest.json">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo-group">
+                <h1>SonicBeacon <span class="badge">UFTP Mesh v1.0</span></h1>
+            </div>
+            <div class="status-group">
+                <span class="device-id-tag" id="local-device-id">ID: 0x8A3F1092</span>
+                <span class="status-indicator offline" id="network-status-dot"></span>
+                <span id="network-status-text">MIC IDLE</span>
+            </div>
+        </header>
+
+        <!-- Main Grid Layout -->
+        <main class="dashboard-grid">
+            <!-- Left Panel: Broadcaster (Transmitter) -->
+            <section class="card transmitter-card">
+                <div class="card-header">
+                    <h2>Transmitter (AFSK)</h2>
+                    <span class="freq-tag">18.5 kHz / 19.5 kHz</span>
+                </div>
+                
+                <form id="tx-form" onsubmit="return false;">
+                    <div class="form-row">
+                        <div class="form-group half">
+                            <label for="target-mode">Target Mode</label>
+                            <select id="target-mode" class="input-select">
+                                <option value="BROADCAST">🌐 Public Broadcast (Everyone)</option>
+                                <option value="DIRECT">🔒 Direct Targeted Person</option>
+                            </select>
+                        </div>
+                        <div class="form-group half" id="target-id-group" style="display: none;">
+                            <label for="target-device-id">Target Device ID</label>
+                            <div class="target-input-row">
+                                <input type="text" id="target-device-id" class="input-select" placeholder="e.g. 0xA1B2C3D4">
+                                <button type="button" id="btn-discover-ping" class="btn btn-secondary btn-sm" title="Ping room to discover nearby IDs">Ping Room</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="payload-type">Payload Mode</label>
+                        <select id="payload-type" class="input-select">
+                            <option value="TEXT">💬 Message / Note / Link</option>
+                            <option value="FILE">📁 Real File (Image, PDF, Doc)</option>
+                        </select>
+                    </div>
+
+                    <!-- Text Message Input -->
+                    <div class="form-group" id="text-input-group">
+                        <label for="payload-text">Message / Note Content</label>
+                        <textarea id="payload-text" class="input-textarea" rows="3" placeholder="Enter message or link string..."></textarea>
+                    </div>
+
+                    <!-- Real File Upload Input -->
+                    <div class="form-group" id="file-input-group" style="display: none;">
+                        <label for="file-picker">Select File to Send</label>
+                        <input type="file" id="file-picker" class="input-select">
+                        <span class="file-info-label" id="file-selected-info">No file selected</span>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group half">
+                            <label for="ttl-select">Relay Hops (TTL)</label>
+                            <select id="ttl-select" class="input-select">
+                                <option value="5">5 Hops (Wide Area)</option>
+                                <option value="3" selected>3 Hops (Standard)</option>
+                                <option value="1">1 Hop (Local Only)</option>
+                            </select>
+                        </div>
+                        <div class="form-group half">
+                            <label for="baud-select">Baud Rate</label>
+                            <select id="baud-select" class="input-select">
+                                <option value="50">50 Baud (Robust)</option>
+                                <option value="100" selected>100 Baud (Standard)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <button type="button" id="btn-transmit" class="btn btn-primary">
+                        Broadcast Audio Frame
+                    </button>
+                </form>
+            </section>
+
+            <!-- Right Panel: Receiver & Spectrum Analyzer -->
+            <section class="card receiver-card">
+                <div class="card-header">
+                    <h2>Receiver & Spectrum</h2>
+                    <button id="btn-toggle-mic" class="btn btn-secondary btn-sm">
+                        Start Listening
+                    </button>
+                </div>
+
+                <!-- Real-Time FFT Canvas Visualizer -->
+                <div class="visualizer-container">
+                    <canvas id="spectrum-canvas" width="600" height="120"></canvas>
+                    <div class="freq-markers">
+                        <span>0 Hz</span>
+                        <span class="marker-target">18.5 kHz (Mark)</span>
+                        <span class="marker-target">19.5 kHz (Space)</span>
+                        <span>22 kHz</span>
+                    </div>
+                </div>
+
+                <!-- Receiver Permission Gate Modal Banner -->
+                <div id="consent-modal" class="consent-card" style="display: none;">
+                    <div class="consent-header">
+                        <span class="consent-title">🔔 Incoming Transfer Permission Request</span>
+                        <span class="consent-badge" id="consent-mode-badge">DIRECT</span>
+                    </div>
+                    <div class="consent-body">
+                        <p><strong>From Sender:</strong> <span id="consent-sender-id">0xAAAA1111</span></p>
+                        <p><strong>Payload Type:</strong> <span id="consent-type">Document / File</span></p>
+                        <p><strong>Content / File:</strong> <span id="consent-preview">report.pdf (2.4 MB)</span></p>
+                    </div>
+                    <div class="consent-actions">
+                        <button type="button" id="btn-decline-transfer" class="btn btn-danger btn-sm">Decline / Ignore</button>
+                        <button type="button" id="btn-accept-transfer" class="btn btn-primary btn-sm">Accept & Download File</button>
+                    </div>
+                </div>
+
+                <!-- Received Messages Feed -->
+                <div class="feed-container">
+                    <h3>Packet Receiver Feed</h3>
+                    <div id="messages-feed" class="messages-feed">
+                        <div class="feed-empty">
+                            <p>No packets received. Click "Start Listening" to activate demodulator.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <p>SonicBeacon Engine &bull; Pure Offline Acoustic Transceiver &bull; IEEE 802.3 CRC32 Protection</p>
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
