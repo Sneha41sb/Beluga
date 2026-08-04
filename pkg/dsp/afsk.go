@@ -1,15 +1,14 @@
 package dsp
 
-// AFSKConfig holds parameters for Audio Frequency-Shift Keying.
 type AFSKConfig struct {
-	SampleRate float64 // e.g. 44100.0
-	MarkFreq   float64 // e.g. 18500.0 (Bit 1)
-	SpaceFreq  float64 // e.g. 19500.0 (Bit 0)
-	BaudRate   int     // e.g. 100 bits/sec
-	Amplitude  float64 // e.g. 0.8
+	SampleRate float64
+	MarkFreq   float64
+	SpaceFreq  float64
+	BaudRate   int
+	Amplitude  float64
 }
 
-// ModulateAFSK converts raw byte data into continuous AFSK audio float64 samples.
+// ModulateAFSK turns raw byte data into continuous AFSK audio float64 samples.
 func ModulateAFSK(data []byte, config AFSKConfig) []float64 {
 	bitDuration := 1.0 / float64(config.BaudRate)
 	var audioStream []float64
