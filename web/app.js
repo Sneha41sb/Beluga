@@ -1,13 +1,16 @@
-// SonicBeacon Web Audio Transceiver Engine
+// SonicBeacon Web Audio Transceiver Engine v2.0
 
 // Protocol Constants
 const SYNC_WORD = [0xAA, 0xAA, 0xAA, 0x7E];
-const MARK_FREQ = 18500.0; // Bit 1 tone
-const SPACE_FREQ = 19500.0; // Bit 0 tone
 const BROADCAST_ID = 0xFFFFFFFF;
 
-// Local Device Identity
+// Frequency Profiles
+let MARK_FREQ = 18500.0; // Default Bit 1 tone (Silent Ultrasonic)
+let SPACE_FREQ = 19500.0; // Default Bit 0 tone (Silent Ultrasonic)
+
+// Local Device Identity & User Handle
 const LOCAL_DEVICE_ID = Math.floor(Math.random() * 0x7FFFFFFF) + 0x10000000;
+let localUserHandle = localStorage.getItem('sonicbeacon_handle') || "Node-Alpha";
 
 // State
 let audioCtx = null;
@@ -30,7 +33,7 @@ function crc32(bytes) {
     return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 
-// Frame Encoder: SyncWord (4B) | Type (1B) | TTL (1B) | SenderID (4B) | TargetID (4B) | MessageID (4B) | Length (2B) | Payload (NB) | CRC32 (4B)
+// Frame Encoder
 function encodeFrame(type, ttl, senderID, targetID, msgID, payloadStr) {
     const encoder = new TextEncoder();
     const payloadBytes = encoder.encode(payloadStr);
@@ -40,10 +43,8 @@ function encodeFrame(type, ttl, senderID, targetID, msgID, payloadStr) {
     const totalLen = headerLen + pLen + 4;
     const buf = new Uint8Array(totalLen);
 
-    // 1. Sync Word
     buf.set(SYNC_WORD, 0);
 
-    // 2. Header
     let idx = SYNC_WORD.length;
     buf[idx++] = type;
     buf[idx++] = ttl;
@@ -61,11 +62,9 @@ function encodeFrame(type, ttl, senderID, targetID, msgID, payloadStr) {
     view.setUint16(idx, pLen, false);
     idx += 2;
 
-    // 3. Payload
     buf.set(payloadBytes, idx);
     idx += pLen;
 
-    // 4. CRC32 Checksum over (Header + Payload)
     const crcData = buf.subarray(SYNC_WORD.length, idx);
     const checksum = crc32(crcData);
     view.setUint32(idx, checksum, false);
@@ -142,11 +141,13 @@ async function transmitBeacon() {
             alert("Please select a file using the file picker.");
             return;
         }
-        typeNum = 6; // File transfer
-        
-        // Convert file to data URI string
+        typeNum = 6;
         payloadStr = await readFileAsDataURL(selectedFileObject);
     }
+
+    const currentHandle = document.getElementById('user-handle-input').value.trim() || "Node-Alpha";
+    localStorage.setItem('sonicbeacon_handle', currentHandle);
+    localUserHandle = currentHandle;
 
     const msgID = Math.floor(Math.random() * 0xFFFFFFFF);
     const packetBytes = encodeFrame(typeNum, ttl, LOCAL_DEVICE_ID, targetID, msgID, payloadStr);
@@ -164,9 +165,9 @@ async function transmitBeacon() {
         btn.disabled = false;
         btn.innerText = `Broadcast Audio Frame`;
 
-        // Trigger self-reception test preview
         triggerReceiverConsentGate({
             senderID: LOCAL_DEVICE_ID,
+            senderHandle: localUserHandle,
             targetID: targetID,
             type: typeNum,
             ttl: ttl,
@@ -197,7 +198,11 @@ function triggerReceiverConsentGate(frame) {
     pendingIncomingFrame = frame;
 
     const modal = document.getElementById('consent-modal');
-    document.getElementById('consent-sender-id').innerText = `0x${frame.senderID.toString(16).toUpperCase()}`;
+    const senderDisplay = frame.senderHandle 
+        ? `${frame.senderHandle} [0x${frame.senderID.toString(16).toUpperCase()}]`
+        : `0x${frame.senderID.toString(16).toUpperCase()}`;
+
+    document.getElementById('consent-sender-id').innerText = senderDisplay;
     document.getElementById('consent-mode-badge').innerText = (frame.targetID === BROADCAST_ID) ? 'PUBLIC' : 'DIRECT';
     
     const typeNames = { 1: "Web URL", 2: "Wi-Fi", 3: "Note", 5: "Emergency Alert", 6: "Document / File" };
@@ -238,12 +243,13 @@ function renderReceivedMessage(frame) {
     const typeNames = { 1: "URL", 2: "WIFI", 3: "NOTE", 5: "ALERT", 6: "FILE" };
     const typeName = typeNames[frame.type] || "DATA";
     const modeName = (frame.targetID === BROADCAST_ID) ? "PUBLIC" : "DIRECT";
+    const senderDisplay = frame.senderHandle ? `${escapeHTML(frame.senderHandle)}` : `0x${frame.senderID.toString(16).toUpperCase()}`;
 
-    if (frame.type === 6 && frame.payloadText.startsWith("data:")) { // Real File Data URI
+    if (frame.type === 6 && frame.payloadText.startsWith("data:")) {
         const fileName = frame.fileName || "received_file.dat";
         card.innerHTML = `
             <div class="msg-header">
-                <span>[FILE] From: 0x${frame.senderID.toString(16).toUpperCase()}</span>
+                <span>[FILE] From: ${senderDisplay}</span>
                 <span>Target: ${modeName} | TTL: ${frame.ttl}</span>
             </div>
             <div class="msg-body">
@@ -255,7 +261,7 @@ function renderReceivedMessage(frame) {
     } else {
         card.innerHTML = `
             <div class="msg-header">
-                <span>[${typeName}] From: 0x${frame.senderID.toString(16).toUpperCase()}</span>
+                <span>[${typeName}] From: ${senderDisplay}</span>
                 <span>Target: ${modeName} | TTL: ${frame.ttl}</span>
             </div>
             <div class="msg-body">${escapeHTML(frame.payloadText)}</div>
@@ -313,7 +319,7 @@ async function toggleMicrophone() {
             btn.innerText = "Stop Listening";
             btn.className = "btn btn-primary btn-sm";
             statusDot.className = "status-indicator active";
-            statusText.innerText = "LISTENING (18.5k/19.5k)";
+            statusText.innerText = `LISTENING (${MARK_FREQ/1000}k/${SPACE_FREQ/1000}k)`;
 
             drawSpectrum();
         } catch (err) {
@@ -343,7 +349,10 @@ function drawSpectrum() {
         const barHeight = (dataArray[i] / 255) * canvas.height;
 
         const approxFreq = (i * (audioCtx.sampleRate / 2)) / bufferLength;
-        if (approxFreq >= 18000 && approxFreq <= 20000) {
+        const targetLow = Math.min(MARK_FREQ, SPACE_FREQ) - 500;
+        const targetHigh = Math.max(MARK_FREQ, SPACE_FREQ) + 500;
+
+        if (approxFreq >= targetLow && approxFreq <= targetHigh) {
             ctx.fillStyle = '#58a6ff';
         } else {
             ctx.fillStyle = 'rgba(139, 148, 158, 0.3)';
@@ -358,8 +367,36 @@ function drawSpectrum() {
 
 // UI Event Listeners & Service Worker Registration
 document.addEventListener('DOMContentLoaded', () => {
-    // Set Local Device ID Tag
+    // Set Local Device ID Tag & User Handle
     document.getElementById('local-device-id').innerText = `ID: 0x${LOCAL_DEVICE_ID.toString(16).toUpperCase()}`;
+    const handleInput = document.getElementById('user-handle-input');
+    handleInput.value = localUserHandle;
+    handleInput.addEventListener('change', (e) => {
+        localUserHandle = e.target.value.trim() || "Node-Alpha";
+        localStorage.setItem('sonicbeacon_handle', localUserHandle);
+    });
+
+    // Frequency Profile Switcher
+    const freqProfileSelect = document.getElementById('freq-profile-select');
+    const activeFreqLabel = document.getElementById('active-freq-label');
+    const markerMarkLabel = document.getElementById('marker-mark-label');
+    const markerSpaceLabel = document.getElementById('marker-space-label');
+
+    freqProfileSelect.addEventListener('change', () => {
+        if (freqProfileSelect.value === 'AUDIBLE') {
+            MARK_FREQ = 2400.0;
+            SPACE_FREQ = 3200.0;
+            activeFreqLabel.innerText = "2.4 kHz / 3.2 kHz (Audible)";
+            markerMarkLabel.innerText = "2.4 kHz (Mark)";
+            markerSpaceLabel.innerText = "3.2 kHz (Space)";
+        } else {
+            MARK_FREQ = 18500.0;
+            SPACE_FREQ = 19500.0;
+            activeFreqLabel.innerText = "18.5 kHz / 19.5 kHz (Silent)";
+            markerMarkLabel.innerText = "18.5 kHz (Mark)";
+            markerSpaceLabel.innerText = "19.5 kHz (Space)";
+        }
+    });
 
     // Register Service Worker for 100% Offline PWA access
     if ('serviceWorker' in navigator) {

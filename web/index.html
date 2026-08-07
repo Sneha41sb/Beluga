@@ -13,9 +13,10 @@
         <!-- Header -->
         <header class="app-header">
             <div class="logo-group">
-                <h1>SonicBeacon <span class="badge">UFTP Mesh v1.0</span></h1>
+                <h1>SonicBeacon <span class="badge">UFTP Mesh v2.0</span></h1>
             </div>
             <div class="status-group">
+                <input type="text" id="user-handle-input" class="input-select handle-input" placeholder="Your Handle" value="Node-Alpha" title="Edit your friendly display name">
                 <span class="device-id-tag" id="local-device-id">ID: 0x8A3F1092</span>
                 <span class="status-indicator offline" id="network-status-dot"></span>
                 <span id="network-status-text">MIC IDLE</span>
@@ -27,12 +28,19 @@
             <!-- Left Panel: Broadcaster (Transmitter) -->
             <section class="card transmitter-card">
                 <div class="card-header">
-                    <h2>Transmitter (AFSK)</h2>
-                    <span class="freq-tag">18.5 kHz / 19.5 kHz</span>
+                    <h2>Transmitter Engine</h2>
+                    <span class="freq-tag" id="active-freq-label">18.5 kHz / 19.5 kHz</span>
                 </div>
                 
                 <form id="tx-form" onsubmit="return false;">
                     <div class="form-row">
+                        <div class="form-group half">
+                            <label for="freq-profile-select">Frequency Profile</label>
+                            <select id="freq-profile-select" class="input-select">
+                                <option value="SILENT" selected>🔊 Silent Ultrasonic (18.5k/19.5k - Indoor)</option>
+                                <option value="AUDIBLE">📢 Long-Range Chirp (2.4k/3.2k - Outdoor)</option>
+                            </select>
+                        </div>
                         <div class="form-group half">
                             <label for="target-mode">Target Mode</label>
                             <select id="target-mode" class="input-select">
@@ -40,12 +48,13 @@
                                 <option value="DIRECT">🔒 Direct Targeted Person</option>
                             </select>
                         </div>
-                        <div class="form-group half" id="target-id-group" style="display: none;">
-                            <label for="target-device-id">Target Device ID</label>
-                            <div class="target-input-row">
-                                <input type="text" id="target-device-id" class="input-select" placeholder="e.g. 0xA1B2C3D4">
-                                <button type="button" id="btn-discover-ping" class="btn btn-secondary btn-sm" title="Ping room to discover nearby IDs">Ping Room</button>
-                            </div>
+                    </div>
+
+                    <div class="form-group" id="target-id-group" style="display: none;">
+                        <label for="target-device-id">Target Device ID</label>
+                        <div class="target-input-row">
+                            <input type="text" id="target-device-id" class="input-select" placeholder="e.g. 0xA1B2C3D4">
+                            <button type="button" id="btn-discover-ping" class="btn btn-secondary btn-sm" title="Ping room to discover nearby IDs">Ping Room</button>
                         </div>
                     </div>
 
@@ -108,8 +117,8 @@
                     <canvas id="spectrum-canvas" width="600" height="120"></canvas>
                     <div class="freq-markers">
                         <span>0 Hz</span>
-                        <span class="marker-target">18.5 kHz (Mark)</span>
-                        <span class="marker-target">19.5 kHz (Space)</span>
+                        <span class="marker-target" id="marker-mark-label">18.5 kHz (Mark)</span>
+                        <span class="marker-target" id="marker-space-label">19.5 kHz (Space)</span>
                         <span>22 kHz</span>
                     </div>
                 </div>
@@ -121,7 +130,7 @@
                         <span class="consent-badge" id="consent-mode-badge">DIRECT</span>
                     </div>
                     <div class="consent-body">
-                        <p><strong>From Sender:</strong> <span id="consent-sender-id">0xAAAA1111</span></p>
+                        <p><strong>From Sender:</strong> <span id="consent-sender-id">Node-Alpha [0xAAAA1111]</span></p>
                         <p><strong>Payload Type:</strong> <span id="consent-type">Document / File</span></p>
                         <p><strong>Content / File:</strong> <span id="consent-preview">report.pdf (2.4 MB)</span></p>
                     </div>

@@ -75,6 +75,13 @@ body {
     margin-left: 0.5rem;
 }
 
+.handle-input {
+    width: 140px !important;
+    padding: 0.25rem 0.5rem !important;
+    font-size: 0.8rem !important;
+    font-family: var(--font-mono);
+}
+
 .device-id-tag {
     font-family: var(--font-mono);
     font-size: 0.75rem;
