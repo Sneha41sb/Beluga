@@ -265,7 +265,7 @@ function createAFSKAudioBuffer(audioCtx, packetBytes, baudRate) {
     const channelData = buffer.getChannelData(0);
 
     let sampleIdx = 0;
-    const amplitude = 0.8;
+    const amplitude = 1.0;
 
     for (let i = 0; i < packetBytes.length; i++) {
         const byteVal = packetBytes[i];
@@ -359,7 +359,11 @@ async function transmitBeacon() {
     const audioBuffer = createAFSKAudioBuffer(audioCtx, packetBytes, baud);
     const source = audioCtx.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(audioCtx.destination);
+    
+    const gainNode = audioCtx.createGain();
+    gainNode.gain.value = 1.0;
+    source.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
 
     const btn = document.getElementById('btn-transmit');
     btn.disabled = true;
@@ -549,7 +553,10 @@ function pingRoomDevices() {
         const audioBuffer = createAFSKAudioBuffer(audioCtx, pingPacket, 100);
         const source = audioCtx.createBufferSource();
         source.buffer = audioBuffer;
-        source.connect(audioCtx.destination);
+        const gainNode = audioCtx.createGain();
+        gainNode.gain.value = 1.0;
+        source.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
         source.start();
     }
 
@@ -610,7 +617,7 @@ async function toggleMicrophone() {
                 processMicrophonePCM(pcm, audioCtx.sampleRate);
             };
             analyserNode.connect(scriptNode);
-            scriptNode.connect(audioCtx.destination);
+            // DO NOT connect scriptNode to audioCtx.destination to prevent speaker loopback ducking!
 
             isListening = true;
             btn.innerText = "Stop Listening";
