@@ -199,55 +199,67 @@ let pcmSampleWindow = [];
 let bitBuffer = [];
 let accumulatedBytes = [];
 
-// Process Microphone Audio Samples in Real-Time
+// Process Microphone Audio Samples in Real-Time with Candidate Phase Alignment
 function processMicrophonePCM(pcmChunk, sampleRate) {
     if (isTransmitting) return; // Do not listen to own speaker echo while transmitting
 
     const baudSelect = document.getElementById('baud-select');
     const baudRate = parseInt(baudSelect ? baudSelect.value : 100) || 100;
     const samplesPerBit = Math.floor(sampleRate / baudRate);
-    const hopSize = Math.floor(samplesPerBit / 2); // Hop size for sliding window alignment
+    if (samplesPerBit <= 0) return;
 
     for (let i = 0; i < pcmChunk.length; i++) {
         pcmSampleWindow.push(pcmChunk[i]);
     }
 
-    if (pcmSampleWindow.length > sampleRate * 10) {
-        pcmSampleWindow.splice(0, pcmSampleWindow.length - (sampleRate * 2));
+    const maxSamples = sampleRate * 5;
+    if (pcmSampleWindow.length > maxSamples) {
+        pcmSampleWindow.splice(0, pcmSampleWindow.length - maxSamples);
     }
 
-    while (pcmSampleWindow.length >= samplesPerBit) {
-        const bitSamples = pcmSampleWindow.slice(0, samplesPerBit);
-        pcmSampleWindow.splice(0, hopSize);
+    const quarter = Math.max(1, Math.floor(samplesPerBit / 4));
 
-        const markPwr = goertzelPower(bitSamples, MARK_FREQ, sampleRate);
-        const spacePwr = goertzelPower(bitSamples, SPACE_FREQ, sampleRate);
+    // Try 4 candidate clock phase offsets
+    for (let phase = 0; phase < 4; phase++) {
+        const offset = phase * quarter;
+        const minRequired = offset + (samplesPerBit * 24);
+        if (pcmSampleWindow.length < minRequired) continue;
 
-        if (markPwr > 0.005 || spacePwr > 0.005) {
-            const bit = (markPwr > spacePwr) ? 1 : 0;
-            bitBuffer.push(bit);
+        let candidateBytes = [];
+        let currentByte = 0;
+        let bitCount = 0;
 
-            if (bitBuffer.length >= 8) {
-                let byteVal = 0;
-                for (let b = 0; b < 8; b++) {
-                    byteVal = (byteVal << 1) | bitBuffer[b];
+        let ptr = offset;
+        while (ptr + samplesPerBit <= pcmSampleWindow.length) {
+            const bitSamples = pcmSampleWindow.slice(ptr, ptr + samplesPerBit);
+            ptr += samplesPerBit;
+
+            const markPwr = goertzelPower(bitSamples, MARK_FREQ, sampleRate);
+            const spacePwr = goertzelPower(bitSamples, SPACE_FREQ, sampleRate);
+
+            if (markPwr > 0.0001 || spacePwr > 0.0001) {
+                const bit = (markPwr > spacePwr) ? 1 : 0;
+                currentByte = (currentByte << 1) | bit;
+                bitCount++;
+
+                if (bitCount === 8) {
+                    candidateBytes.push(currentByte);
+                    currentByte = 0;
+                    bitCount = 0;
+
+                    if (candidateBytes.length >= 24) {
+                        const parsed = parseFrameFromBytes(new Uint8Array(candidateBytes));
+                        if (parsed) {
+                            pcmSampleWindow = pcmSampleWindow.slice(ptr);
+                            handleIncomingFrame(parsed.frame);
+                            return;
+                        }
+                    }
                 }
-                accumulatedBytes.push(byteVal);
-                bitBuffer.shift(); // Sliding byte search
-
-                if (accumulatedBytes.length > 2000) {
-                    accumulatedBytes.shift();
-                }
-
-                const parsed = parseFrameFromBytes(new Uint8Array(accumulatedBytes));
-                if (parsed) {
-                    accumulatedBytes = [];
-                    bitBuffer = [];
-                    handleIncomingFrame(parsed.frame);
-                }
+            } else {
+                bitCount = 0;
+                currentByte = 0;
             }
-        } else {
-            if (bitBuffer.length > 0) bitBuffer = [];
         }
     }
 }
