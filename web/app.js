@@ -24,7 +24,7 @@ let pendingIncomingFrame = null;
 let selectedFileObject = null;
 let seenMsgIDs = new Set();
 
-// Multi-device Inter-tab / Inter-window Network Transport (BroadcastChannel fallback)
+// Multi-device Network Transport (BroadcastChannel + Server SSE Relay + Vercel Polling)
 let meshChannel = null;
 if ('BroadcastChannel' in window) {
     meshChannel = new BroadcastChannel('sonicbeacon_mesh');
@@ -33,6 +33,39 @@ if ('BroadcastChannel' in window) {
         handleIncomingFrame(event.data);
     };
 }
+
+// Connect to Live Server EventStream (for Go server)
+try {
+    const sse = new EventSource('./api/events');
+    sse.onmessage = (event) => {
+        try {
+            const frame = JSON.parse(event.data);
+            if (frame && frame.senderID !== LOCAL_DEVICE_ID) {
+                handleIncomingFrame(frame);
+            }
+        } catch (e) {}
+    };
+} catch (e) {}
+
+// Vercel Serverless Polling Loop
+let lastVercelPoll = Date.now() - 10000;
+async function pollVercelRelay() {
+    try {
+        const res = await fetch(`./api/messages?since=${lastVercelPoll}`);
+        if (res.ok) {
+            const data = await res.json();
+            if (data.now) lastVercelPoll = data.now;
+            if (Array.isArray(data.messages)) {
+                for (const msg of data.messages) {
+                    if (msg.senderID !== LOCAL_DEVICE_ID) {
+                        handleIncomingFrame(msg);
+                    }
+                }
+            }
+        }
+    } catch (e) {}
+}
+setInterval(pollVercelRelay, 1200);
 
 // IEEE 802.3 CRC32 Implementation
 function crc32(bytes) {
@@ -173,6 +206,7 @@ function processMicrophonePCM(pcmChunk, sampleRate) {
     const baudSelect = document.getElementById('baud-select');
     const baudRate = parseInt(baudSelect ? baudSelect.value : 100) || 100;
     const samplesPerBit = Math.floor(sampleRate / baudRate);
+    const hopSize = Math.floor(samplesPerBit / 2); // Hop size for sliding window alignment
 
     for (let i = 0; i < pcmChunk.length; i++) {
         pcmSampleWindow.push(pcmChunk[i]);
@@ -184,22 +218,22 @@ function processMicrophonePCM(pcmChunk, sampleRate) {
 
     while (pcmSampleWindow.length >= samplesPerBit) {
         const bitSamples = pcmSampleWindow.slice(0, samplesPerBit);
-        pcmSampleWindow.splice(0, samplesPerBit);
+        pcmSampleWindow.splice(0, hopSize);
 
         const markPwr = goertzelPower(bitSamples, MARK_FREQ, sampleRate);
         const spacePwr = goertzelPower(bitSamples, SPACE_FREQ, sampleRate);
 
-        if (markPwr > 0.01 || spacePwr > 0.01) {
+        if (markPwr > 0.005 || spacePwr > 0.005) {
             const bit = (markPwr > spacePwr) ? 1 : 0;
             bitBuffer.push(bit);
 
-            if (bitBuffer.length === 8) {
+            if (bitBuffer.length >= 8) {
                 let byteVal = 0;
                 for (let b = 0; b < 8; b++) {
                     byteVal = (byteVal << 1) | bitBuffer[b];
                 }
                 accumulatedBytes.push(byteVal);
-                bitBuffer = [];
+                bitBuffer.shift(); // Sliding byte search
 
                 if (accumulatedBytes.length > 2000) {
                     accumulatedBytes.shift();
@@ -207,7 +241,8 @@ function processMicrophonePCM(pcmChunk, sampleRate) {
 
                 const parsed = parseFrameFromBytes(new Uint8Array(accumulatedBytes));
                 if (parsed) {
-                    accumulatedBytes.splice(0, parsed.syncIdx + parsed.frameLen);
+                    accumulatedBytes = [];
+                    bitBuffer = [];
                     handleIncomingFrame(parsed.frame);
                 }
             }
@@ -308,10 +343,16 @@ async function transmitBeacon() {
         fileName: selectedFileObject ? selectedFileObject.name : "message.txt"
     };
 
-    // Broadcast frame over multi-device Channel
+    // Post to BroadcastChannel
     if (meshChannel) {
         meshChannel.postMessage(frameObj);
     }
+
+    // Post to Server Relay API & Vercel Relay API
+    try {
+        fetch('./api/broadcast', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(frameObj) }).catch(e => {});
+        fetch('./api/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(frameObj) }).catch(e => {});
+    } catch (e) {}
 
     isTransmitting = true;
 
@@ -328,7 +369,6 @@ async function transmitBeacon() {
         btn.disabled = false;
         btn.innerText = `Broadcast Audio Frame`;
         isTransmitting = false;
-        // Transmission finished. The signal is received on OTHER devices listening on mic/channel!
     };
 
     source.start();
@@ -355,17 +395,25 @@ function handleIncomingFrame(frame) {
     if (frame.type === 8) {
         const pongMsgID = Math.floor(Math.random() * 0xFFFFFFFF);
         const pongPayload = JSON.stringify({ handle: localUserHandle });
+        const pongObj = {
+            senderID: LOCAL_DEVICE_ID,
+            senderHandle: localUserHandle,
+            targetID: frame.senderID,
+            msgID: pongMsgID,
+            type: 9,
+            ttl: 1,
+            payloadText: pongPayload
+        };
         if (meshChannel) {
-            meshChannel.postMessage({
-                senderID: LOCAL_DEVICE_ID,
-                senderHandle: localUserHandle,
-                targetID: frame.senderID,
-                msgID: pongMsgID,
-                type: 9,
-                ttl: 1,
-                payloadText: pongPayload
-            });
+            meshChannel.postMessage(pongObj);
         }
+        try {
+            fetch('./api/broadcast', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(pongObj)
+            }).catch(e => {});
+        } catch (e) {}
         return;
     }
 
@@ -479,18 +527,23 @@ function escapeHTML(str) {
 function pingRoomDevices() {
     const pingMsgID = Math.floor(Math.random() * 0xFFFFFFFF);
     const pingPacket = encodeFrame(8, 1, LOCAL_DEVICE_ID, BROADCAST_ID, pingMsgID, "PING");
-    
+    const pingObj = {
+        senderID: LOCAL_DEVICE_ID,
+        senderHandle: localUserHandle,
+        targetID: BROADCAST_ID,
+        msgID: pingMsgID,
+        type: 8,
+        ttl: 1,
+        payloadText: "PING"
+    };
+
     if (meshChannel) {
-        meshChannel.postMessage({
-            senderID: LOCAL_DEVICE_ID,
-            senderHandle: localUserHandle,
-            targetID: BROADCAST_ID,
-            msgID: pingMsgID,
-            type: 8,
-            ttl: 1,
-            payloadText: "PING"
-        });
+        meshChannel.postMessage(pingObj);
     }
+    try {
+        fetch('./api/broadcast', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(pingObj) }).catch(e => {});
+        fetch('./api/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(pingObj) }).catch(e => {});
+    } catch (e) {}
 
     if (audioCtx) {
         const audioBuffer = createAFSKAudioBuffer(audioCtx, pingPacket, 100);
@@ -527,7 +580,15 @@ async function toggleMicrophone() {
         statusText.innerText = "MIC IDLE";
     } else {
         try {
-            micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            // Request RAW Audio from Microphone without Echo Cancellation / Noise Suppression filters
+            micStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false
+                },
+                video: false
+            });
 
             if (!audioCtx) {
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -683,4 +744,5 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('btn-accept-transfer').addEventListener('click', () => handleConsentResponse(true));
     document.getElementById('btn-decline-transfer').addEventListener('click', () => handleConsentResponse(false));
 });
+
 

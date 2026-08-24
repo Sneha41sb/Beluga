@@ -2,17 +2,56 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"math/rand"
+	"net/http"
 	"os"
+	"sync"
 	"time"
 	"uftp/pkg/dsp"
 	"uftp/pkg/frame"
 	"uftp/pkg/mesh"
 )
 
+type Hub struct {
+	sync.Mutex
+	clients map[chan []byte]bool
+}
+
+var hub = Hub{
+	clients: make(map[chan []byte]bool),
+}
+
+func (h *Hub) Broadcast(data []byte) {
+	h.Lock()
+	defer h.Unlock()
+	for clientChan := range h.clients {
+		select {
+		case clientChan <- data:
+		default:
+		}
+	}
+}
+
+func (h *Hub) Register(c chan []byte) {
+	h.Lock()
+	defer h.Unlock()
+	h.clients[c] = true
+}
+
+func (h *Hub) Unregister(c chan []byte) {
+	h.Lock()
+	defer h.Unlock()
+	if _, ok := h.clients[c]; ok {
+		delete(h.clients, c)
+		close(c)
+	}
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage:")
+		fmt.Println("  go run cmd/uftp/main.go server [port]")
 		fmt.Println("  go run cmd/uftp/main.go send <message>")
 		fmt.Println("  go run cmd/uftp/main.go simulate-mesh")
 		return
@@ -29,6 +68,73 @@ func main() {
 	}
 
 	switch cmd {
+	case "server":
+		port := "8080"
+		if len(os.Args) >= 3 {
+			port = os.Args[2]
+		}
+
+		// Static Web File Server
+		fs := http.FileServer(http.Dir("./web"))
+		http.Handle("/", fs)
+
+		// SSE Event Stream for Live Multi-Device Relay
+		http.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+
+			clientChan := make(chan []byte, 10)
+			hub.Register(clientChan)
+			defer hub.Unregister(clientChan)
+
+			notify := r.Context().Done()
+			for {
+				select {
+				case <-notify:
+					return
+				case data := <-clientChan:
+					fmt.Fprintf(w, "data: %s\n\n", string(data))
+					if flusher, ok := w.(http.Flusher); ok {
+						flusher.Flush()
+					}
+				}
+			}
+		})
+
+		// Broadcast Endpoint for Incoming Client Frames
+		http.HandleFunc("/api/broadcast", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "Failed to read body", http.StatusBadRequest)
+				return
+			}
+
+			hub.Broadcast(body)
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"ok"}`))
+		})
+
+		fmt.Printf("🚀 [SonicBeacon UFTP Server] Running on http://0.0.0.0:%s\n", port)
+		fmt.Println("📡 Connect your devices on the same Wi-Fi/Network to transmit over server relay & acoustic audio.")
+		if err := http.ListenAndServe(":"+port, nil); err != nil {
+			fmt.Printf("❌ Server Error: %v\n", err)
+		}
+
 	case "send":
 		if len(os.Args) < 3 {
 			fmt.Println("Error: Please provide a message to send")
@@ -117,3 +223,4 @@ func main() {
 		fmt.Println("Unknown command:", cmd)
 	}
 }
+
