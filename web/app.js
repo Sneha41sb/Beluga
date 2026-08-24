@@ -16,10 +16,23 @@ let localUserHandle = localStorage.getItem('sonicbeacon_handle') || "Node-Alpha"
 let audioCtx = null;
 let micStream = null;
 let isListening = false;
+let isTransmitting = false;
 let analyserNode = null;
+let scriptNode = null;
 let animFrameId = null;
 let pendingIncomingFrame = null;
 let selectedFileObject = null;
+let seenMsgIDs = new Set();
+
+// Multi-device Inter-tab / Inter-window Network Transport (BroadcastChannel fallback)
+let meshChannel = null;
+if ('BroadcastChannel' in window) {
+    meshChannel = new BroadcastChannel('sonicbeacon_mesh');
+    meshChannel.onmessage = (event) => {
+        if (!event.data || event.data.senderID === LOCAL_DEVICE_ID) return;
+        handleIncomingFrame(event.data);
+    };
+}
 
 // IEEE 802.3 CRC32 Implementation
 function crc32(bytes) {
@@ -70,6 +83,138 @@ function encodeFrame(type, ttl, senderID, targetID, msgID, payloadStr) {
     view.setUint32(idx, checksum, false);
 
     return buf;
+}
+
+// Goertzel Algorithm for Single-Frequency Energy Power Calculation
+function goertzelPower(samples, targetFreq, sampleRate) {
+    const N = samples.length;
+    if (N === 0) return 0;
+    const k = Math.round((N * targetFreq) / sampleRate);
+    const omega = (2.0 * Math.PI * k) / N;
+    const coeff = 2.0 * Math.cos(omega);
+    let q0 = 0, q1 = 0, q2 = 0;
+    for (let i = 0; i < N; i++) {
+        q0 = coeff * q1 - q2 + samples[i];
+        q2 = q1;
+        q1 = q0;
+    }
+    return (q1 * q1) + (q2 * q2) - (q1 * q2 * coeff);
+}
+
+// Parse and Validate Incoming Binary Packet Bytes
+function parseFrameFromBytes(bytes) {
+    const minLen = SYNC_WORD.length + 1 + 1 + 4 + 4 + 4 + 2 + 4;
+    if (bytes.length < minLen) return null;
+
+    let syncIdx = -1;
+    for (let i = 0; i <= bytes.length - SYNC_WORD.length; i++) {
+        if (bytes[i] === SYNC_WORD[0] && bytes[i+1] === SYNC_WORD[1] &&
+            bytes[i+2] === SYNC_WORD[2] && bytes[i+3] === SYNC_WORD[3]) {
+            syncIdx = i;
+            break;
+        }
+    }
+    if (syncIdx === -1) return null;
+
+    let idx = syncIdx + SYNC_WORD.length;
+    if (bytes.length < idx + 16) return null;
+
+    const type = bytes[idx++];
+    const ttl = bytes[idx++];
+
+    const view = new DataView(bytes.buffer, bytes.byteOffset + idx, bytes.length - idx);
+    const senderID = view.getUint32(0, false);
+    const targetID = view.getUint32(4, false);
+    const msgID = view.getUint32(8, false);
+    const payloadLen = view.getUint16(12, false);
+    idx += 14;
+
+    if (bytes.length < idx + payloadLen + 4) return null;
+
+    const payloadBytes = bytes.subarray(idx, idx + payloadLen);
+    idx += payloadLen;
+
+    const expectedCRC = view.getUint32(14 + payloadLen, false);
+    const crcData = bytes.subarray(syncIdx + SYNC_WORD.length, syncIdx + SYNC_WORD.length + 16 + payloadLen);
+    const actualCRC = crc32(crcData);
+
+    if (expectedCRC !== actualCRC) {
+        console.warn("[Demodulator] CRC mismatch!");
+        return null;
+    }
+
+    const decoder = new TextDecoder();
+    const payloadText = decoder.decode(payloadBytes);
+
+    return {
+        syncIdx: syncIdx,
+        frameLen: SYNC_WORD.length + 16 + payloadLen + 4,
+        frame: {
+            type,
+            ttl,
+            senderID,
+            targetID,
+            msgID,
+            payloadText,
+            fileName: type === 6 ? "received_file.dat" : null
+        }
+    };
+}
+
+// Demodulation Pipeline Buffer
+let pcmSampleWindow = [];
+let bitBuffer = [];
+let accumulatedBytes = [];
+
+// Process Microphone Audio Samples in Real-Time
+function processMicrophonePCM(pcmChunk, sampleRate) {
+    if (isTransmitting) return; // Do not listen to own speaker echo while transmitting
+
+    const baudSelect = document.getElementById('baud-select');
+    const baudRate = parseInt(baudSelect ? baudSelect.value : 100) || 100;
+    const samplesPerBit = Math.floor(sampleRate / baudRate);
+
+    for (let i = 0; i < pcmChunk.length; i++) {
+        pcmSampleWindow.push(pcmChunk[i]);
+    }
+
+    if (pcmSampleWindow.length > sampleRate * 10) {
+        pcmSampleWindow.splice(0, pcmSampleWindow.length - (sampleRate * 2));
+    }
+
+    while (pcmSampleWindow.length >= samplesPerBit) {
+        const bitSamples = pcmSampleWindow.slice(0, samplesPerBit);
+        pcmSampleWindow.splice(0, samplesPerBit);
+
+        const markPwr = goertzelPower(bitSamples, MARK_FREQ, sampleRate);
+        const spacePwr = goertzelPower(bitSamples, SPACE_FREQ, sampleRate);
+
+        if (markPwr > 0.01 || spacePwr > 0.01) {
+            const bit = (markPwr > spacePwr) ? 1 : 0;
+            bitBuffer.push(bit);
+
+            if (bitBuffer.length === 8) {
+                let byteVal = 0;
+                for (let b = 0; b < 8; b++) {
+                    byteVal = (byteVal << 1) | bitBuffer[b];
+                }
+                accumulatedBytes.push(byteVal);
+                bitBuffer = [];
+
+                if (accumulatedBytes.length > 2000) {
+                    accumulatedBytes.shift();
+                }
+
+                const parsed = parseFrameFromBytes(new Uint8Array(accumulatedBytes));
+                if (parsed) {
+                    accumulatedBytes.splice(0, parsed.syncIdx + parsed.frameLen);
+                    handleIncomingFrame(parsed.frame);
+                }
+            }
+        } else {
+            if (bitBuffer.length > 0) bitBuffer = [];
+        }
+    }
 }
 
 // Modulate Packet Bytes to AudioBuffer
@@ -152,6 +297,24 @@ async function transmitBeacon() {
     const msgID = Math.floor(Math.random() * 0xFFFFFFFF);
     const packetBytes = encodeFrame(typeNum, ttl, LOCAL_DEVICE_ID, targetID, msgID, payloadStr);
 
+    const frameObj = {
+        senderID: LOCAL_DEVICE_ID,
+        senderHandle: localUserHandle,
+        targetID: targetID,
+        msgID: msgID,
+        type: typeNum,
+        ttl: ttl,
+        payloadText: payloadStr,
+        fileName: selectedFileObject ? selectedFileObject.name : "message.txt"
+    };
+
+    // Broadcast frame over multi-device Channel
+    if (meshChannel) {
+        meshChannel.postMessage(frameObj);
+    }
+
+    isTransmitting = true;
+
     const audioBuffer = createAFSKAudioBuffer(audioCtx, packetBytes, baud);
     const source = audioCtx.createBufferSource();
     source.buffer = audioBuffer;
@@ -164,16 +327,8 @@ async function transmitBeacon() {
     source.onended = () => {
         btn.disabled = false;
         btn.innerText = `Broadcast Audio Frame`;
-
-        triggerReceiverConsentGate({
-            senderID: LOCAL_DEVICE_ID,
-            senderHandle: localUserHandle,
-            targetID: targetID,
-            type: typeNum,
-            ttl: ttl,
-            payloadText: payloadStr,
-            fileName: selectedFileObject ? selectedFileObject.name : "message.txt"
-        });
+        isTransmitting = false;
+        // Transmission finished. The signal is received on OTHER devices listening on mic/channel!
     };
 
     source.start();
@@ -188,13 +343,56 @@ function readFileAsDataURL(file) {
     });
 }
 
-// Trigger Receiver Permission Consent Modal
-function triggerReceiverConsentGate(frame) {
+// Handle Incoming Frame (From Microphone Acoustic Demodulator or Mesh Network Channel)
+function handleIncomingFrame(frame) {
+    if (seenMsgIDs.has(frame.msgID)) return;
+    seenMsgIDs.add(frame.msgID);
+
+    // Ignore self-transmitted frames
+    if (frame.senderID === LOCAL_DEVICE_ID) return;
+
+    // Type 8: Discovery Ping Request
+    if (frame.type === 8) {
+        const pongMsgID = Math.floor(Math.random() * 0xFFFFFFFF);
+        const pongPayload = JSON.stringify({ handle: localUserHandle });
+        if (meshChannel) {
+            meshChannel.postMessage({
+                senderID: LOCAL_DEVICE_ID,
+                senderHandle: localUserHandle,
+                targetID: frame.senderID,
+                msgID: pongMsgID,
+                type: 9,
+                ttl: 1,
+                payloadText: pongPayload
+            });
+        }
+        return;
+    }
+
+    // Type 9: Discovery Pong Response
+    if (frame.type === 9) {
+        let discoveredHandle = "Device";
+        try {
+            const parsed = JSON.parse(frame.payloadText);
+            if (parsed.handle) discoveredHandle = parsed.handle;
+        } catch (e) {}
+        const hexID = "0x" + frame.senderID.toString(16).toUpperCase();
+        document.getElementById('target-device-id').value = hexID;
+        alert(`📡 Discovered nearby device!\n\nName: ${discoveredHandle}\nID: ${hexID}`);
+        return;
+    }
+
+    // Direct targeting vs Broadcast check
     if (frame.targetID !== BROADCAST_ID && frame.targetID !== LOCAL_DEVICE_ID) {
         console.log(`[Receiver] Ignored frame targeted to 0x${frame.targetID.toString(16).toUpperCase()}`);
         return;
     }
 
+    triggerReceiverConsentGate(frame);
+}
+
+// Trigger Receiver Permission Consent Modal
+function triggerReceiverConsentGate(frame) {
     pendingIncomingFrame = frame;
 
     const modal = document.getElementById('consent-modal');
@@ -277,11 +475,32 @@ function escapeHTML(str) {
     );
 }
 
-// Ping Room Discovery Simulation
+// Room Discovery Ping
 function pingRoomDevices() {
-    const randomDiscoveredID = "0x" + (Math.floor(Math.random() * 0x7FFFFFFF) + 0x10000000).toString(16).toUpperCase();
-    document.getElementById('target-device-id').value = randomDiscoveredID;
-    alert(`📡 Ultrasonic Room Ping Sent!\n\nDiscovered nearby device ID: ${randomDiscoveredID}`);
+    const pingMsgID = Math.floor(Math.random() * 0xFFFFFFFF);
+    const pingPacket = encodeFrame(8, 1, LOCAL_DEVICE_ID, BROADCAST_ID, pingMsgID, "PING");
+    
+    if (meshChannel) {
+        meshChannel.postMessage({
+            senderID: LOCAL_DEVICE_ID,
+            senderHandle: localUserHandle,
+            targetID: BROADCAST_ID,
+            msgID: pingMsgID,
+            type: 8,
+            ttl: 1,
+            payloadText: "PING"
+        });
+    }
+
+    if (audioCtx) {
+        const audioBuffer = createAFSKAudioBuffer(audioCtx, pingPacket, 100);
+        const source = audioCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioCtx.destination);
+        source.start();
+    }
+
+    alert(`📡 Ultrasonic Room Ping Sent!\n\nWaiting for responses from listening devices...`);
 }
 
 // Toggle Microphone Listener & Real-Time Spectrum Visualizer
@@ -291,6 +510,10 @@ async function toggleMicrophone() {
     const statusText = document.getElementById('network-status-text');
 
     if (isListening) {
+        if (scriptNode) {
+            scriptNode.disconnect();
+            scriptNode = null;
+        }
         if (micStream) {
             micStream.getTracks().forEach(track => track.stop());
         }
@@ -310,10 +533,23 @@ async function toggleMicrophone() {
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             }
 
+            if (audioCtx.state === 'suspended') {
+                await audioCtx.resume();
+            }
+
             const micSource = audioCtx.createMediaStreamSource(micStream);
             analyserNode = audioCtx.createAnalyser();
             analyserNode.fftSize = 2048;
             micSource.connect(analyserNode);
+
+            scriptNode = audioCtx.createScriptProcessor(2048, 1, 1);
+            scriptNode.onaudioprocess = (e) => {
+                if (!isListening) return;
+                const pcm = e.inputBuffer.getChannelData(0);
+                processMicrophonePCM(pcm, audioCtx.sampleRate);
+            };
+            analyserNode.connect(scriptNode);
+            scriptNode.connect(audioCtx.destination);
 
             isListening = true;
             btn.innerText = "Stop Listening";
@@ -447,3 +683,4 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('btn-accept-transfer').addEventListener('click', () => handleConsentResponse(true));
     document.getElementById('btn-decline-transfer').addEventListener('click', () => handleConsentResponse(false));
 });
+
