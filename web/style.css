@@ -110,6 +110,15 @@ body {
 .status-indicator.offline { background-color: var(--text-muted); }
 .status-indicator.active { background-color: #3fb950; }
 
+#relay-status-text {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.6rem;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: #21262d;
+    cursor: help;
+}
+
 /* Dashboard Grid */
 .dashboard-grid {
     display: grid;

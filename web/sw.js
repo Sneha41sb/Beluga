@@ -5,7 +5,10 @@ const ASSETS_TO_CACHE = [
     './',
     './index.html',
     './style.css',
-    './app.js'
+    './app.js',
+    './manifest.json',
+    './icon-192.png',
+    './icon-512.png'
 ];
 
 // Install Event: Pre-cache static assets for 100% offline access

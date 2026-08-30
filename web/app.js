@@ -3,6 +3,7 @@
 // Protocol Constants
 const SYNC_WORD = [0xAA, 0xAA, 0xAA, 0x7E];
 const BROADCAST_ID = 0xFFFFFFFF;
+const MAX_RELAY_FILE_BYTES = 3 * 1024 * 1024; // Raw bytes; base64 + JSON overhead must stay under Vercel's ~4.5MB body limit
 
 // Frequency Profiles
 let MARK_FREQ = 18500.0; // Default Bit 1 tone (Silent Ultrasonic)
@@ -34,9 +35,43 @@ if ('BroadcastChannel' in window) {
     };
 }
 
+// Network relay status, surfaced in the header so a broken relay is visible
+// instead of silently failing (this used to be swallowed by empty catch
+// blocks, which made it look like transfers were sent when the receiving
+// device could never actually fetch them).
+const relayStatus = { sse: 'connecting', poll: 'unknown' };
+
+function updateRelayStatusUI() {
+    const el = document.getElementById('relay-status-text');
+    if (!el) return;
+    if (relayStatus.sse === 'connected') {
+        el.innerText = 'RELAY: LAN (Go server)';
+        el.title = 'Connected to the self-hosted Go relay server over SSE.';
+    } else if (relayStatus.poll === 'ok') {
+        el.innerText = relayStatus.pollPersistent ? 'RELAY: CLOUD' : 'RELAY: CLOUD (best-effort)';
+        el.title = relayStatus.pollPersistent
+            ? 'Connected to the Vercel relay with persistent storage configured.'
+            : 'Connected to the Vercel relay, but it has no persistent store configured (UPSTASH_REDIS_REST_URL/TOKEN) — messages may not reach a device polling a different server instance.';
+    } else {
+        el.innerText = 'RELAY: OFFLINE';
+        el.title = 'No network relay reachable. Run `go run cmd/uftp/main.go server` on the same Wi-Fi/LAN for reliable multi-device delivery, or rely on acoustic transfer within range.';
+    }
+}
+
 // Connect to Live Server EventStream (for Go server)
-try {
-    const sse = new EventSource('./api/events');
+let sseReconnectAttempts = 0;
+function connectSSE() {
+    let sse;
+    try {
+        sse = new EventSource('./api/events');
+    } catch (e) {
+        return;
+    }
+    sse.onopen = () => {
+        sseReconnectAttempts = 0;
+        relayStatus.sse = 'connected';
+        updateRelayStatusUI();
+    };
     sse.onmessage = (event) => {
         try {
             const frame = JSON.parse(event.data);
@@ -45,16 +80,34 @@ try {
             }
         } catch (e) {}
     };
-} catch (e) {}
+    sse.onerror = () => {
+        relayStatus.sse = 'error';
+        updateRelayStatusUI();
+        sse.close();
+        sseReconnectAttempts++;
+        // Give up after a handful of attempts (e.g. plain static hosting with
+        // no backend at all) instead of retrying forever in the background.
+        if (sseReconnectAttempts <= 5) {
+            setTimeout(connectSSE, 3000 * sseReconnectAttempts);
+        } else {
+            console.warn('[Relay] No SSE relay server found at ./api/events — falling back to cloud polling / acoustic only.');
+        }
+    };
+}
+connectSSE();
 
 // Vercel Serverless Polling Loop
 let lastVercelPoll = Date.now() - 10000;
+let pollWarned = false;
 async function pollVercelRelay() {
     try {
         const res = await fetch(`./api/messages?since=${lastVercelPoll}`);
         if (res.ok) {
             const data = await res.json();
             if (data.now) lastVercelPoll = data.now;
+            relayStatus.poll = 'ok';
+            relayStatus.pollPersistent = Boolean(data.persistent);
+            updateRelayStatusUI();
             if (Array.isArray(data.messages)) {
                 for (const msg of data.messages) {
                     if (msg.senderID !== LOCAL_DEVICE_ID) {
@@ -62,10 +115,41 @@ async function pollVercelRelay() {
                     }
                 }
             }
+        } else {
+            relayStatus.poll = 'error';
+            updateRelayStatusUI();
         }
-    } catch (e) {}
+    } catch (e) {
+        relayStatus.poll = 'error';
+        updateRelayStatusUI();
+        if (!pollWarned) {
+            pollWarned = true;
+            console.warn('[Relay] Cloud relay (./api/messages) unreachable. Devices will only see each other via acoustic transfer, BroadcastChannel (same browser), or the self-hosted Go server.');
+        }
+    }
 }
 setInterval(pollVercelRelay, 1200);
+pollVercelRelay();
+
+// Send a frame object to every reachable network relay transport. Failures
+// are tracked via relayStatus/console instead of being silently swallowed.
+function relaySend(frameObj) {
+    if (meshChannel) {
+        meshChannel.postMessage(frameObj);
+    }
+    const body = JSON.stringify(frameObj);
+    fetch('./api/broadcast', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+        .catch(() => {});
+    fetch('./api/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+        .then((res) => {
+            if (!res.ok) {
+                res.json().then((err) => {
+                    console.warn('[Relay] ./api/messages rejected the frame:', err && err.detail ? err.detail : err);
+                }).catch(() => {});
+            }
+        })
+        .catch(() => {});
+}
 
 // IEEE 802.3 CRC32 Implementation
 function crc32(bytes) {
@@ -333,6 +417,14 @@ async function transmitBeacon() {
             alert("Please select a file using the file picker.");
             return;
         }
+        if (selectedFileObject.size > MAX_RELAY_FILE_BYTES && relayStatus.sse !== 'connected') {
+            const proceed = confirm(
+                `This file (${Math.round(selectedFileObject.size / 1024)} KB) is large for the cloud relay, which caps requests around ${Math.round(MAX_RELAY_FILE_BYTES / 1024 / 1024)}MB.\n\n` +
+                `It will likely be rejected and the receiving device will never see it. For large files, run the self-hosted Go relay server on the same Wi-Fi ("go run cmd/uftp/main.go server") instead.\n\n` +
+                `Send anyway?`
+            );
+            if (!proceed) return;
+        }
         typeNum = 6;
         payloadStr = await readFileAsDataURL(selectedFileObject);
     }
@@ -355,16 +447,8 @@ async function transmitBeacon() {
         fileName: selectedFileObject ? selectedFileObject.name : "message.txt"
     };
 
-    // Post to BroadcastChannel
-    if (meshChannel) {
-        meshChannel.postMessage(frameObj);
-    }
-
-    // Post to Server Relay API & Vercel Relay API
-    try {
-        fetch('./api/broadcast', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(frameObj) }).catch(e => {});
-        fetch('./api/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(frameObj) }).catch(e => {});
-    } catch (e) {}
+    // Post to every reachable network relay transport (BroadcastChannel, LAN Go server, cloud)
+    relaySend(frameObj);
 
     isTransmitting = true;
 
@@ -420,16 +504,7 @@ function handleIncomingFrame(frame) {
             ttl: 1,
             payloadText: pongPayload
         };
-        if (meshChannel) {
-            meshChannel.postMessage(pongObj);
-        }
-        try {
-            fetch('./api/broadcast', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(pongObj)
-            }).catch(e => {});
-        } catch (e) {}
+        relaySend(pongObj);
         return;
     }
 
@@ -553,13 +628,7 @@ function pingRoomDevices() {
         payloadText: "PING"
     };
 
-    if (meshChannel) {
-        meshChannel.postMessage(pingObj);
-    }
-    try {
-        fetch('./api/broadcast', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(pingObj) }).catch(e => {});
-        fetch('./api/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(pingObj) }).catch(e => {});
-    } catch (e) {}
+    relaySend(pingObj);
 
     if (audioCtx) {
         const audioBuffer = createAFSKAudioBuffer(audioCtx, pingPacket, 100);

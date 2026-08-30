@@ -138,11 +138,25 @@ go run cmd/uftp/main.go simulate-mesh
 
 ### Step 3: Launch the SonicBeacon Web Dashboard
 
-Start the web server:
+**Recommended — Go relay server (required for cross-device transfer):**
 
 ```bash
-python3 -m http.server 8080 --directory web
+go run cmd/uftp/main.go server 8080
 ```
+
+This serves the web app **and** the `/api/events` (SSE) + `/api/broadcast` relay
+endpoints on the same port. Two or more devices on the same Wi-Fi/LAN opening
+`http://<your-computer's-LAN-IP>:8080` in a browser will reliably see each
+other's transfers over the network relay, in addition to (or instead of)
+acoustic transfer.
+
+> ⚠️ **Do not use a plain static file server** (e.g. `python3 -m http.server`)
+> if you need transfers to reach a *different* device. It only serves the
+> static HTML/JS/CSS with no backend, so `/api/events` and `/api/broadcast`
+> 404, and the receiving device silently never gets anything except acoustic
+> audio it can actually demodulate. This was the cause of "sender shows sent,
+> receiver never fetches it" — the frame was never reaching the relay at all.
+> A static server is fine only for previewing the UI on a single device.
 
 Open **`http://localhost:8080`** in your browser!
 
@@ -158,6 +172,33 @@ Open **`http://localhost:8080`** in your browser!
    - Click **Start Listening** to activate microphone demodulation and the live FFT spectrum canvas.
    - When an incoming transfer arrives, a **Permission Consent Request Banner** displays.
    - Click **Accept & Download File** to save the file directly to your disk!
+
+The header shows a **`RELAY:`** badge (`LAN`, `CLOUD`, `CLOUD (best-effort)`,
+or `OFFLINE`) so you can see at a glance whether the network relay is actually
+reachable, instead of transfers silently vanishing.
+
+---
+
+## ☁️ 6. Deploying to Vercel
+
+`vercel.json` + `api/messages.js` let you deploy SonicBeacon as a static site
+with two serverless relay endpoints (`/api/messages`, `/api/broadcast`), no Go
+server required. By default this relay stores messages **in memory**, which
+only survives within a single warm serverless instance — on real traffic,
+Vercel may route your two devices' requests to different instances, so a
+transfer can appear "sent" but never reach the other device.
+
+**For guaranteed delivery**, connect a free Upstash Redis database to the
+project (Vercel dashboard → Storage → Marketplace → Upstash → Redis), which
+sets `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` automatically —
+`api/messages.js` detects them and persists messages there instead. Without
+it, the relay still works for casual/low-traffic testing, and the `RELAY:`
+badge will show `CLOUD (best-effort)` as a reminder.
+
+Large file transfers (`Real File` payload mode) are capped around 3–4MB on
+the cloud relay to stay under Vercel's request body limit — the app warns
+before sending an oversized file and recommends the self-hosted Go relay
+server (no such limit) for bigger files.
 
 ---
 
