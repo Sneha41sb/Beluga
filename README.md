@@ -161,7 +161,7 @@ go run cmd/uftp/main.go server 8080
 
 This serves the web app **and** the `/api/events` (SSE) and `/api/broadcast` relay endpoints on the same port. Any two devices on the same Wi-Fi/LAN opening `http://<your-computer's-LAN-IP>:8080` will reliably see each other's transfers over the network relay, in addition to (or instead of) acoustic transfer.
 
-> ⚠️ **Do not use a plain static file server** (e.g. `python3 -m http.server`) if you need transfers to reach a *different* device. A static server only serves the HTML/JS/CSS with no backend, so `/api/events` and `/api/broadcast` return 404s, and the receiving device never gets anything except acoustic audio it can demodulate directly. This was the root cause of "sender shows sent, receiver never fetches it" — the frame never reached the relay. A static server is fine for previewing the UI on a single device only.
+> **Do not use a plain static file server** (e.g. `python3 -m http.server`) if you need transfers to reach a *different* device. A static server only serves the HTML/JS/CSS with no backend, so `/api/events` and `/api/broadcast` return 404s, and the receiving device never gets anything except acoustic audio it can demodulate directly. This was the root cause of "sender shows sent, receiver never fetches it" — the frame never reached the relay. A static server is fine for previewing the UI on a single device only.
 
 Open **`http://localhost:8080`** in your browser.
 
